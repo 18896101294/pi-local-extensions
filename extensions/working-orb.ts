@@ -69,13 +69,25 @@ export default function workingMessage(pi: ExtensionAPI): void {
           const padding = " ".repeat(
             Math.max(1, width - visibleWidth(left) - visibleWidth(right)),
           );
-          return [
+          const lines = [
             truncateToWidth(
               theme.fg("dim", left) + padding + theme.fg("dim", right),
               width,
               "",
             ),
           ];
+
+          // 自定义 footer 需要主动保留其他扩展通过 setStatus 设置的状态标识。
+          const statusLine = Array.from(footerData.getExtensionStatuses().entries())
+            .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+            .map(([, text]) => text.replace(/[\r\n]+/g, " "))
+            .join(" ");
+          if (statusLine) {
+            lines.push(
+              truncateToWidth(statusLine, width, theme.fg("dim", "...")),
+            );
+          }
+          return lines;
         },
         invalidate(): void {},
         dispose(): void {
