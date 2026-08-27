@@ -1,0 +1,28 @@
+{
+  "name": "pi-local-extensions",
+  "version": "0.1.0",
+  "description": "一组轻量的 Pi 交互与显示增强扩展",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/18896101294/pi-local-extensions.git"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/openai-codex-fast.ts",
+      "./extensions/otty-task-title.ts",
+      "./extensions/quiet-tool-output/index.ts",
+      "./extensions/user-message-focus/index.ts",
+      "./extensions/working-orb.ts"
+    ]
+  }
+}
