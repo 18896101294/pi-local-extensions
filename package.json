@@ -11,6 +11,12 @@
     "type": "git",
     "url": "https://github.com/18896101294/pi-local-extensions.git"
   },
+  "scripts": {
+    "test": "node --test --experimental-strip-types tests/*.test.ts"
+  },
+  "dependencies": {
+    "marked": "^18.0.11"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
@@ -18,6 +24,7 @@
   },
   "pi": {
     "extensions": [
+      "./extensions/copy-rich/index.ts",
       "./extensions/openai-codex-fast.ts",
       "./extensions/otty-task-title.ts",
       "./extensions/quiet-tool-output/index.ts",
