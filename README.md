@@ -32,7 +32,7 @@ pi install https://github.com/18896101294/pi-local-extensions
 /copy-rich-history
 ```
 
-`/copy-rich` 复制最后一条助手回复；`/copy-rich-history` 从当前会话分支中选择一条历史助手回复再复制。
+`/copy-rich` 复制最后一条助手回复；`/copy-rich-history` 从当前会话分支中选择一条历史助手回复再复制。历史选择器每页显示 10 条，默认定位到最新回复，使用 `←` / `→` 翻页、`↑` / `↓` 选择、`Enter` 复制、`Esc` 退出。
 
 两个命令都会在 macOS 上同时写入剪贴板的 HTML 与纯文本格式。粘贴到飞书时优先保留标题、粗体、列表、链接、代码块和表格等格式；目标编辑器不支持 HTML 时会回退为 Markdown 纯文本。
 

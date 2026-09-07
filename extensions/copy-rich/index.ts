@@ -8,6 +8,7 @@ import {
   findLastAssistantMarkdown,
   listAssistantMarkdown,
 } from "./core.ts";
+import { HistorySelector } from "./history-selector.ts";
 
 /** 将指定 Markdown 写入富文本剪贴板并反馈结果。 */
 async function copyMarkdown(markdown: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -39,20 +40,29 @@ export default function copyRichExtension(pi: ExtensionAPI): void {
   pi.registerCommand("copy-rich-history", {
     description: "选择一条历史助手回复并复制为可粘贴到飞书的富文本",
     handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/copy-rich-history 仅支持交互模式", "error");
+        return;
+      }
+
       const messages = listAssistantMarkdown(ctx.sessionManager.getBranch());
       if (messages.length === 0) {
         ctx.ui.notify("没有可复制的历史助手回复", "error");
         return;
       }
 
-      const selectedLabel = await ctx.ui.select(
-        "选择要复制的助手回复",
-        messages.map((message) => message.label),
+      const selectedMarkdown = await ctx.ui.custom<string | undefined>(
+        (tui, theme, keybindings, done) =>
+          new HistorySelector(
+            messages,
+            theme,
+            keybindings,
+            done,
+            () => done(undefined),
+            () => tui.requestRender(),
+          ),
       );
-      if (!selectedLabel) return;
-
-      const selected = messages.find((message) => message.label === selectedLabel);
-      if (selected) await copyMarkdown(selected.markdown, ctx);
+      if (selectedMarkdown) await copyMarkdown(selectedMarkdown, ctx);
     },
   });
 }
