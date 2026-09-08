@@ -6,7 +6,6 @@ import {
   AssistantMessageComponent,
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
 import {
   installHiddenThinkingRendering,
   installQuietToolRendering,
@@ -24,7 +23,7 @@ export default function quietToolOutputExtension(pi: ExtensionAPI): void {
    */
   function enableQuietMode(ctx: ExtensionContext): void {
     if (!restoreRendering) {
-      const restoreToolRendering = installQuietToolRendering(ToolExecutionComponent, truncateToWidth);
+      const restoreToolRendering = installQuietToolRendering(ToolExecutionComponent);
       const restoreThinkingRendering = installHiddenThinkingRendering(AssistantMessageComponent);
       restoreRendering = () => {
         restoreThinkingRendering();
