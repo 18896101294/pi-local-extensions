@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createRichClipboardPayload,
+  createRichClipboardRtf,
   findLastAssistantMarkdown,
   listAssistantMarkdown,
 } from "../extensions/copy-rich/core.ts";
@@ -67,7 +68,16 @@ test("将 Markdown 转为飞书可读取的 HTML，同时保留纯文本回退",
   assert.equal(payload.plain, markdown);
   assert.match(payload.html, /<h2>标题<\/h2>/);
   assert.match(payload.html, /<li><strong>重点<\/strong><\/li>/);
-  assert.match(payload.html, /<table>/);
+  assert.match(payload.html, /<table border="1" cellspacing="0" cellpadding="4">/);
+  assert.match(payload.html, /<th style="border:1px solid #d0d7de;padding:4px 8px">/);
   assert.match(payload.html, /<!--StartFragment-->/);
   assert.match(payload.html, /<!--EndFragment-->/);
+});
+
+test("为 HTML 表格生成包含原生单元格结构的 RTF", async () => {
+  const payload = createRichClipboardPayload("| A | B |\n|---|---|\n| 1 | 2 |");
+  const rtf = await createRichClipboardRtf(payload.html);
+
+  assert.match(rtf.toString("utf8"), /\\trowd/);
+  assert.match(rtf.toString("utf8"), /\\cell/);
 });

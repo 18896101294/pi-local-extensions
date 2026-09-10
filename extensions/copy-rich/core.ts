@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -17,10 +17,13 @@ function run(argv) {
   const payload = $.NSJSONSerialization.JSONObjectWithDataOptionsError(data, 0, null).js;
   const pasteboard = $.NSPasteboard.generalPasteboard;
 
+  const rtf = $.NSData.alloc.initWithBase64EncodedStringOptions($(payload.rtf), 0);
+
   pasteboard.clearContents;
+  const rtfWritten = pasteboard.setDataForType(rtf, $.NSPasteboardTypeRTF);
   const htmlWritten = pasteboard.setStringForType($(payload.html), $.NSPasteboardTypeHTML);
   const textWritten = pasteboard.setStringForType($(payload.plain), $.NSPasteboardTypeString);
-  if (!htmlWritten || !textWritten) throw new Error("写入剪贴板失败");
+  if (!rtfWritten || !htmlWritten || !textWritten) throw new Error("写入剪贴板失败");
 }
 `;
 
@@ -90,10 +93,15 @@ export function findLastAssistantMarkdown(entries: readonly SessionEntryLike[]):
 
 /** 将 Markdown 转换为包含 HTML 与纯文本回退的剪贴板载荷。 */
 export function createRichClipboardPayload(markdown: string): RichClipboardPayload {
-  const fragment = marked.parse(markdown, {
-    async: false,
-    gfm: true,
-  });
+  const fragment = marked
+    .parse(markdown, {
+      async: false,
+      gfm: true,
+    })
+    // 明确表格边框和单元格间距，避免富文本编辑器将无样式表格降级为普通段落。
+    .replace(/<table>/gu, '<table border="1" cellspacing="0" cellpadding="4">')
+    .replace(/<th([^>]*)>/gu, '<th$1 style="border:1px solid #d0d7de;padding:4px 8px">')
+    .replace(/<td([^>]*)>/gu, '<td$1 style="border:1px solid #d0d7de;padding:4px 8px">');
 
   return {
     plain: markdown,
@@ -108,12 +116,43 @@ export function createRichClipboardPayload(markdown: string): RichClipboardPaylo
   };
 }
 
-/** 通过 macOS NSPasteboard 同时写入 HTML 与纯文本剪贴板格式。 */
+/** 将 HTML 转换为保留原生表格单元格结构的 RTF。 */
+export async function createRichClipboardRtf(html: string): Promise<Buffer> {
+  if (process.platform !== "darwin") {
+    throw new Error("/copy-rich 当前仅支持 macOS");
+  }
+
+  const tempDirectory = await mkdtemp(join(tmpdir(), "pi-copy-rich-rtf-"));
+  const htmlPath = join(tempDirectory, "content.html");
+  const rtfPath = join(tempDirectory, "content.rtf");
+
+  try {
+    await writeFile(htmlPath, html, "utf8");
+    await execFileAsync("/usr/bin/textutil", [
+      "-convert",
+      "rtf",
+      "-format",
+      "html",
+      "-output",
+      rtfPath,
+      htmlPath,
+    ], {
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    return await readFile(rtfPath);
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+}
+
+/** 通过 macOS NSPasteboard 同时写入 RTF、HTML 与纯文本剪贴板格式。 */
 export async function copyRichTextToClipboard(payload: RichClipboardPayload): Promise<void> {
   if (process.platform !== "darwin") {
     throw new Error("/copy-rich 当前仅支持 macOS");
   }
 
+  const rtf = await createRichClipboardRtf(payload.html);
   const tempDirectory = await mkdtemp(join(tmpdir(), "pi-copy-rich-"));
   const scriptPath = join(tempDirectory, "copy-rich.js");
   const payloadPath = join(tempDirectory, "payload.json");
@@ -121,7 +160,7 @@ export async function copyRichTextToClipboard(payload: RichClipboardPayload): Pr
   try {
     await Promise.all([
       writeFile(scriptPath, COPY_RICH_SCRIPT, "utf8"),
-      writeFile(payloadPath, JSON.stringify(payload), "utf8"),
+      writeFile(payloadPath, JSON.stringify({ ...payload, rtf: rtf.toString("base64") }), "utf8"),
     ]);
     await execFileAsync("/usr/bin/osascript", ["-l", "JavaScript", scriptPath, payloadPath], {
       timeout: 5000,
