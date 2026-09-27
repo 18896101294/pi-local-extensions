@@ -27,6 +27,7 @@
       "./extensions/copy-rich/index.ts",
       "./extensions/branch.ts",
       "./extensions/code/index.ts",
+      "./extensions/diff/index.ts",
       "./extensions/openai-codex-fast.ts",
       "./extensions/otty-task-title.ts",
       "./extensions/quiet-tool-output/index.ts",
