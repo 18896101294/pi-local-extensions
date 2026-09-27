@@ -7,6 +7,7 @@
 | 扩展 | 功能 |
 | --- | --- |
 | `branch` | 通过 `/branch` 查看并切换当前仓库的本地 Git 分支 |
+| `code` | 通过 `/code` 在 Pi 终端只读浏览代码、选区引用与 LSP 跳转 |
 | `copy-rich` | 通过 `/copy-rich` 或 `/copy-rich-history` 将助手 Markdown 回复复制为飞书可识别的富文本 |
 | `openai-codex-fast` | 通过 `/fast on` 和 `/fast off` 控制 OpenAI Codex priority 服务层级 |
 | `otty-task-title` | 注册 `set_otty_task_title` 工具，用简短任务摘要更新 Otty 标签标题 |
@@ -29,6 +30,12 @@ pi install https://github.com/18896101294/pi-local-extensions
 ### Git 分支切换
 
 在 Git 仓库目录启动 Pi 后输入 `/branch`，可查看本地分支及当前分支标记。输入文字筛选，使用 `↑` / `↓` 选择、`Enter` 切换、`Esc` 取消。不会自动拉取远端分支、暂存改动或强制切换；Git 拒绝切换时会显示错误。
+
+### 只读代码面板
+
+在项目目录输入 `/code`，搜索文件名并按 `Enter` 打开。代码视图使用方向键移动光标，`v` 标记选区起点、移动到终点后按 `y` 将选中行连同文件路径和行号放入对话输入框；不会自动发送，也不会改写文件。`f` 返回文件列表，`q` 退出。
+
+对于已安装语言服务器的文件，可在光标处按 `g` 跳转定义、`r` 查看引用、`h` 查看悬停信息、`d` 查看诊断；在结果列表按 `Enter` 跳转、`Esc` 返回。当前识别 `clangd`（C/C++）及 `sourcekit-lsp`（Swift），其他语言仍能只读浏览，不会自动下载语言服务器。文件搜索使用本机 `rg`；已忽略的文件不在列表中。面板只打开当前目录内不超过 1 MB 的文本文件，不跟随指向目录外的符号链接。
 
 ### 富文本复制
 
@@ -75,6 +82,7 @@ PI_USER_MESSAGE_LABEL='我：' pi
 
 - 不包含 API Key、Token、密码或本机 IPC 配置。
 - `branch` 只在用户主动选择后运行 `git switch`；不使用强制切换或自动暂存。
+- `code` 不写文件、不自动发送消息；仅在打开支持的文件时运行本机语言服务器。
 - `copy-rich` 只在用户主动执行命令时读取最后一条助手回复并覆盖系统剪贴板。
 - `openai-codex-fast` 只在用户主动开启时修改 OpenAI Codex 请求的服务层级。
 - 显示类扩展只修改当前 Pi 进程中的 TUI 渲染，关闭会话时恢复官方行为。
