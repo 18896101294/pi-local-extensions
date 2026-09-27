@@ -12,12 +12,14 @@ function repo(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-diff-")));
   execFileSync("git", ["init", "-q", "-b", "main", root]);
   writeFileSync(join(root, "source.txt"), "old\nkeep\n");
-  execFileSync("git", ["add", "source.txt"], { cwd: root });
+  writeFileSync(join(root, "delete.txt"), "gone\n");
+  execFileSync("git", ["add", "source.txt", "delete.txt"], { cwd: root });
   execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "init"], { cwd: root });
   writeFileSync(join(root, "source.txt"), "new\nkeep\n");
   execFileSync("git", ["add", "source.txt"], { cwd: root });
   writeFileSync(join(root, "source.txt"), "new\nkeep\nextra\n");
   writeFileSync(join(root, "notes.txt"), "note\n");
+  rmSync(join(root, "delete.txt"));
   return root;
 }
 
@@ -69,13 +71,68 @@ test("/diff 包含暂存、未暂存和未跟踪文件，不声称都是 AI 改�
       assert.match(menu, /可能包含手动改动/);
       for (const char of "notes") panel.handleInput(char);
       panel.handleInput("\r");
-      assert.match(await until(panel, "+note"), /\+note/);
+      assert.match(await until(panel, "旧版 HEAD"), /note/);
       assert.ok(panel.render(35).every((line: string) => visibleWidth(line) <= 35), "窄终端的差异行不应溢出");
       panel.handleInput("\x1b");
       panel.handleInput("\x1b");
     });
     await command.run();
     assert.equal(command.getDraft(), "原有问题");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("大于 1 MB 的新增文本按旧版空白、当前版全文并排展示", async () => {
+  const root = repo();
+  writeFileSync(join(root, "large.html"), `<html>\n<img src="data:image/png;base64,${"A".repeat(2_400_000)}">\n</html>\n`);
+  const command = setup(root);
+  try {
+    command.drive(async (panel) => {
+      const menu = panel.render(100).join("\n");
+      assert.match(menu, /M\s+source\.txt/);
+      assert.match(menu, /D\s+delete\.txt/);
+      assert.match(menu, /A\s+large\.html/);
+      for (const char of "large.html") panel.handleInput(char);
+      panel.handleInput("\r");
+      const view = await until(panel, "<html>");
+      assert.match(view, /旧版 HEAD/);
+      assert.match(view, /当前工作区/);
+      assert.doesNotMatch(view, /未加载正文/);
+      for (let i = 0; i < 6; i++) panel.handleInput("\x1b[B");
+      assert.match(panel.render(100).join("\n"), /<\/html>/);
+      panel.handleInput("q");
+    });
+    await command.run();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("删除文件仅在 HEAD 旧版显示内容", async () => {
+  const root = repo();
+  const command = setup(root);
+  try {
+    command.drive(async (panel) => {
+      for (const char of "delete") panel.handleInput(char);
+      panel.handleInput("\r");
+      const view = await until(panel, "旧版 HEAD");
+      assert.match(view, /删除 · delete\.txt/);
+      assert.ok(view.split("\n").some((line) => /gone\s+│/.test(line)), "删除的原文应只出现在左侧");
+      panel.handleInput("q");
+    });
+    await command.run();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("修改文件将旧行与新行排在同一行对比", async () => {
+  const root = repo();
+  const command = setup(root);
+  try {
+    command.drive(async (panel) => {
+      for (const char of "source") panel.handleInput(char);
+      panel.handleInput("\r");
+      const view = await until(panel, "旧版 HEAD");
+      assert.ok(view.split("\n").some((line) => line.includes("old") && line.includes("new")), "-old 与 +new 应左右对齐");
+      panel.handleInput("q");
+    });
+    await command.run();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -87,21 +144,21 @@ test("差异行评论可批量放入对话输入框，保留草稿且不改文�
     command.drive(async (panel) => {
       for (const char of "source") panel.handleInput(char);
       panel.handleInput("\r");
-      const view = await until(panel, "+extra");
-      assert.match(view, /-old/);
-      assert.match(view, /\+new/);
+      const view = await until(panel, "旧版 HEAD");
+      assert.ok(view.split("\n").some((line) => line.includes("old") && line.includes("new")));
+      assert.match(view, /extra/);
       for (let i = 0; i < 25; i++) {
-        if ((panel.render(100).find((line: string) => line.trimStart().startsWith("›")) ?? "").includes("+extra")) break;
+        if ((panel.render(100).find((line: string) => line.trimStart().startsWith("›")) ?? "").includes("extra")) break;
         panel.handleInput("\x1b[B");
       }
       panel.handleInput("c");
       for (const char of "请解释这一行") panel.handleInput(char);
       panel.handleInput("\r");
       for (let i = 0; i < 25; i++) {
-        if ((panel.render(100).find((line: string) => line.trimStart().startsWith("›")) ?? "").includes("-old")) break;
+        if ((panel.render(100).find((line: string) => line.trimStart().startsWith("›")) ?? "").includes("old")) break;
         panel.handleInput("\x1b[A");
       }
-      panel.handleInput("c");
+      panel.handleInput("C");
       for (const char of "删除原因？") panel.handleInput(char);
       panel.handleInput("\r");
       panel.handleInput("S");
