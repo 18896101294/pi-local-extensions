@@ -5,7 +5,10 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { LspClient, type Location } from "../extensions/code/lsp.ts";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { CodePanel } from "../extensions/code/index.ts";
+
+initTheme("dark");
 
 /** 使用真实 clangd 验证 LSP 协议与跨位置跳转，而不依赖测试替身。 */
 test("代码面板可沿着 clangd 的定义位置跳转", async (t) => {

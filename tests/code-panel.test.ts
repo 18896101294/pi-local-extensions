@@ -3,6 +3,8 @@ import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "n
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { highlightCode, initTheme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import codeExtension, { CodePanel, selectedCode } from "../extensions/code/index.ts";
 
 const theme = { fg: (_name: string, text: string) => text } as any;
@@ -105,6 +107,33 @@ test("项目目录全都无法访问时不暴露系统错误", async () => {
     assert.match(notices.at(-1)?.[0] ?? "", /项目目录/);
     assert.doesNotMatch(notices.at(-1)?.[0] ?? "", /Permission denied/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("代码视图按语言区分关键字、注释和字符串，高亮后仍不溢出终端", async () => {
+  initTheme("dark");
+  const keyword = highlightCode("export", "typescript")[0]!;
+  const string = highlightCode('"hello"', "typescript")[0]!;
+  const comment = highlightCode("// note", "typescript")[0]!;
+  const activeTheme = { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => `\x1b[48;5;236m${value}\x1b[49m` } as any;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-code-syntax-")));
+  writeFileSync(join(root, "example.ts"), 'export const answer = "hello";\n// note\n');
+  const panel = new CodePanel(root, ["example.ts"], activeTheme, () => {}, () => {});
+  try {
+    panel.handleInput("\r");
+    await tick();
+    const output = panel.render(42);
+    const code = output.find((item) => item.includes("export")) ?? "";
+    assert.ok(code.includes(keyword), "export 应按关键字高亮");
+    assert.ok(code.includes(string), "字符串应使用另一种颜色");
+    assert.ok(output.find((item) => item.includes("// note"))?.includes(comment), "注释应独立着色");
+    assert.ok(output.every((item) => visibleWidth(item) <= 42), "高亮不能破坏终端宽度");
+    panel.handleInput("v");
+    panel.handleInput("\x1b[B");
+    const selected = panel.render(42);
+    const selectedComment = selected.find((item) => item.includes("// note")) ?? "";
+    assert.ok(selectedComment.includes("\x1b[48;5;236m"), "选区应有背景色");
+    assert.ok(selectedComment.includes(comment.split("\x1b[39m")[0]!), "选区不能覆盖语法颜色");
+  } finally { panel.dispose(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("代码中有反引号时选区围栏不会提前结束", () => {

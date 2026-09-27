@@ -3,8 +3,8 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Input, matchesKey, SelectList, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
+import { getLanguageFromPath, highlightCode, type ExtensionAPI, type ExtensionCommandContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { Input, matchesKey, SelectList, sliceByColumn, truncateToWidth, visibleWidth, type SelectItem } from "@earendil-works/pi-tui";
 import { LspClient, type Diagnostic, type Location } from "./lsp.ts";
 
 const globalCsharpTool = join(homedir(), ".dotnet", "tools", process.platform === "win32" ? "csharp-ls.exe" : "csharp-ls");
@@ -74,6 +74,7 @@ export class CodePanel {
   private list!: SelectList;
   private file = "";
   private lines: string[] = [];
+  private highlightedLines?: string[];
   private row = 0;
   private column = 0;
   private top = 0;
@@ -129,6 +130,7 @@ export class CodePanel {
       this.client = undefined;
       this.file = path;
       this.lines = text.split("\n");
+      this.highlightedLines = undefined;
       this.row = Math.min(at?.line ?? 0, this.lines.length - 1);
       this.column = at?.character ?? 0;
       this.top = Math.max(0, this.row - 5);
@@ -273,10 +275,10 @@ export class CodePanel {
   render(width: number): string[] {
     const color = this.theme.fg.bind(this.theme);
     const line = (text: string) => truncateToWidth(safeDisplay(text), Math.max(1, width - 1), "…");
-    const title = color("accent", " CODE  /  只读浏览");
+    const title = color("accent", line(" CODE  /  只读浏览"));
     if (this.mode === "files") {
       this.input.focused = this.focused;
-      return [title, color("muted", line(` ${this.root} · ${this.options.length} 个文件`)), ...this.input.render(width), ...this.list.render(width), ...(this.message ? [color("warning", line(` ${this.message}`))] : []), color("dim", " 输入筛选  ↑↓ 选择  Enter 打开  Esc 退出")];
+      return [title, color("muted", line(` ${this.root} · ${this.options.length} 个文件`)), ...this.input.render(width), ...this.list.render(width), ...(this.message ? [color("warning", line(` ${this.message}`))] : []), color("dim", line(" 输入筛选  ↑↓ 选择  Enter 打开  Esc 退出"))];
     }
     const status = color("muted", line(` ${relative(this.root, this.file)}  ${this.row + 1}:${this.column + 1}`));
     const info = color("accent", line(` ${this.message}`));
@@ -288,32 +290,37 @@ export class CodePanel {
         const label = ` ${start + index === this.resultIndex ? "›" : " "} ${location} ${this.detail[start + index] ?? ""}`;
         return start + index === this.resultIndex ? color("accent", line(label)) : line(label);
       });
-      return [title, status, info, ...rows, color("dim", " ↑↓ 选择  Enter 跳转  Esc 返回")];
+      return [title, status, info, ...rows, color("dim", line(" ↑↓ 选择  Enter 跳转  Esc 返回"))];
     }
-    if (this.mode === "detail") return [title, status, info, ...this.detail.slice(this.detailTop, this.detailTop + 12).map(line), color("dim", " ↑↓ 滚动  Esc 返回")];
+    if (this.mode === "detail") return [title, status, info, ...this.detail.slice(this.detailTop, this.detailTop + 12).map(line), color("dim", line(" ↑↓ 滚动  Esc 返回"))];
 
     // 代码窗口跟随光标，行号、选区与诊断符号分别标记。
     if (this.row < this.top) this.top = this.row;
     if (this.row >= this.top + 18) this.top = this.row - 17;
     const diagnostics = new Set((this.client?.getDiagnostics(this.file) ?? []).map((item: Diagnostic) => item.range.start.line));
+    // 对整份文件着色以保持跨行字符串/注释状态，主题变更时通过 invalidate 重新生成。
+    const language = getLanguageFromPath(this.file);
+    this.highlightedLines ??= language ? highlightCode(this.lines.map(safeDisplay).join("\n"), language) : this.lines.map(safeDisplay);
     const rows = this.lines.slice(this.top, this.top + 18).map((text, index) => {
       const number = this.top + index;
       const selected = this.mark !== undefined && number >= Math.min(this.mark, this.row) && number <= Math.max(this.mark, this.row);
-      const prefix = `${number === this.row ? "›" : " "}${String(number + 1).padStart(4)}${diagnostics.has(number) ? "!" : " "} `;
+      const gutter = `${number === this.row ? "›" : " "}${String(number + 1).padStart(4)}${diagnostics.has(number) ? "!" : " "} `;
+      const source = this.highlightedLines?.[number] ?? safeDisplay(text);
+      const column = visibleWidth(safeDisplay(text.slice(0, this.column)));
       const shown = number === this.row
-        ? `${text.slice(0, this.column)}▏${text.slice(this.column)}`
-        : text;
-      const value = line(prefix + shown);
-      return selected ? color("success", value) : number === this.row ? color("accent", value) : value;
+        ? sliceByColumn(source, 0, column) + color("accent", "▏") + sliceByColumn(source, column, visibleWidth(source) - column)
+        : source;
+      const value = truncateToWidth(color(number === this.row ? "accent" : "muted", gutter) + shown, Math.max(1, width - 1), "…");
+      return selected ? this.theme.bg("selectedBg", value) : value;
     });
     return [title, status, info, ...rows,
-      color("dim", " ↑↓←→ 定位  v 选区  y 放入输入框  f 文件  q 退出"),
-      color("dim", " g 定义  r 引用  h 悬停  d 诊断  Esc 返回文件")];
+      color("dim", line(" ↑↓←→ 定位  v 选区  y 放入输入框  f 文件  q 退出")),
+      color("dim", line(" g 定义  r 引用  h 悬停  d 诊断  Esc 返回文件"))];
   }
 
   /** 关闭 UI 时兜底清理进程。 */
   dispose(): void { this.client?.stop(); }
-  invalidate(): void {}
+  invalidate(): void { this.highlightedLines = undefined; }
 }
 
 /** 注册 /code 命令，只在交互终端展示代码面板。 */
