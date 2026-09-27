@@ -13,18 +13,20 @@ function repo(): string {
   execFileSync("git", ["init", "-q", "-b", "main", root]);
   writeFileSync(join(root, "source.txt"), "old\nkeep\n");
   writeFileSync(join(root, "delete.txt"), "gone\n");
-  execFileSync("git", ["add", "source.txt", "delete.txt"], { cwd: root });
+  writeFileSync(join(root, "rename.txt"), "rename me\n");
+  execFileSync("git", ["add", "source.txt", "delete.txt", "rename.txt"], { cwd: root });
   execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "init"], { cwd: root });
   writeFileSync(join(root, "source.txt"), "new\nkeep\n");
   execFileSync("git", ["add", "source.txt"], { cwd: root });
   writeFileSync(join(root, "source.txt"), "new\nkeep\nextra\n");
   writeFileSync(join(root, "notes.txt"), "note\n");
   rmSync(join(root, "delete.txt"));
+  execFileSync("git", ["mv", "rename.txt", "renamed.txt"], { cwd: root });
   return root;
 }
 
 /** 使用真实 Git 命令模拟 Pi 的只读执行接口。 */
-function setup(cwd: string) {
+function setup(cwd: string, theme: any = { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => value }) {
   let handler: (args: string, ctx: any) => Promise<void>;
   let draft = "原有问题";
   const notices: Array<[string, string]> = [];
@@ -42,7 +44,7 @@ function setup(cwd: string) {
     setEditorText: (text: string) => { draft = text; },
     custom: (factory: any) => new Promise((resolve, reject) => {
       try {
-        const panel = factory({ requestRender() {} }, { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => value }, null, resolve);
+        const panel = factory({ requestRender() {} }, theme, null, resolve);
         void drive(panel).catch(reject);
       } catch (error) { reject(error); }
     }),
@@ -78,6 +80,31 @@ test("/diff 包含暂存、未暂存和未跟踪文件，不声称都是 AI 改�
     });
     await command.run();
     assert.equal(command.getDraft(), "原有问题");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("文件状态标记各有语义颜色，选中时仍保留颜色", async () => {
+  const root = repo();
+  const colors: Record<string, number> = { success: 32, warning: 33, error: 31, accent: 36, muted: 90 };
+  const theme = {
+    fg: (name: string, value: string) => `\x1b[${colors[name] ?? 37}m${value}\x1b[39m`,
+    bg: (_name: string, value: string) => value,
+  };
+  const command = setup(root, theme);
+  try {
+    command.drive(async (panel) => {
+      const view = panel.render(100).join("\n");
+      assert.match(view, /\x1b\[32mA\x1b\[39m/, "新增标记应为成功色");
+      assert.match(view, /\x1b\[33mM\x1b\[39m/, "修改标记应为警示色");
+      assert.match(view, /\x1b\[31mD\x1b\[39m/, "删除标记应为错误色");
+      assert.match(view, /\x1b\[36mR\x1b\[39m/, "重命名标记应为强调色");
+      panel.handleInput("\x1b[B");
+      panel.handleInput("\x1b[B");
+      const selected = panel.render(100).find((line: string) => line.includes("source.txt")) ?? "";
+      assert.ok(selected.includes("→ ") && selected.includes("\x1b[33mM\x1b[39m"), "选中修改文件时标记仍是警示色");
+      panel.handleInput("\x1b");
+    });
+    await command.run();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

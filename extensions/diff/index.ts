@@ -1,12 +1,17 @@
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Input, matchesKey, SelectList, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionCommandContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { Input, matchesKey, SelectList, stripTerminalSequences, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
 
 type FileEntry = { path: string; status: string; oldPath?: string; untracked: boolean };
 type DiffRow = { text: string; kind: "added" | "removed" | "hunk" | "context" | "meta"; oldLine?: number; newLine?: number };
 type CompareRow = { before?: DiffRow; after?: DiffRow; note?: string };
 type Comment = { path: string; row: CompareRow; side: "old" | "new"; text: string };
+
+/** 将 Git 状态映射到 Pi 当前主题的语义颜色。 */
+function statusColor(status: string): ThemeColor {
+  return status === "A" ? "success" : status === "M" ? "warning" : status === "D" ? "error" : status === "R" ? "accent" : "muted";
+}
 
 /** 清除差异与文件名中的终端控制字符，防止内容影响界面。 */
 function safeDisplay(text: string): string {
@@ -111,10 +116,21 @@ export class DiffPanel {
   private filter(query: string): void {
     this.list = new SelectList(this.options.filter((item) => item.label.toLowerCase().includes(query.toLowerCase())), 14, {
       selectedPrefix: (text) => this.theme.fg("accent", text),
-      selectedText: (text) => this.theme.fg("accent", text),
+      selectedText: (text) => {
+        // 列表自带的选中颜色会覆盖整行；重新为状态标记着色，文件名仍保持强调色。
+        const plain = stripTerminalSequences(text);
+        return this.theme.fg("accent", plain.slice(0, 2))
+          + this.theme.fg(statusColor(plain[2] ?? ""), plain[2] ?? "")
+          + this.theme.fg("accent", plain.slice(3));
+      },
       description: (text) => this.theme.fg("muted", text),
       scrollInfo: (text) => this.theme.fg("dim", text),
       noMatch: () => this.theme.fg("warning", "  没有匹配的文件"),
+    }, {
+      truncatePrimary: ({ text, maxWidth }) => {
+        const shown = truncateToWidth(text, maxWidth, "");
+        return this.theme.fg(statusColor(shown[0] ?? ""), shown[0] ?? "") + shown.slice(1);
+      },
     });
     this.list.onSelect = (item) => { void this.open(this.entries[Number(item.value)]!); };
     this.list.onCancel = () => this.leave();
