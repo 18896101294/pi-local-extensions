@@ -1,4 +1,5 @@
 import { readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -292,11 +293,21 @@ export default function codeExtension(pi: ExtensionAPI): void {
     description: "只读浏览当前目录代码，选区送入对话框并使用本机 LSP 跳转",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       if (ctx.mode !== "tui") { ctx.ui.notify("/code 仅支持 Pi 交互终端", "error"); return; }
-      const found = await pi.exec("rg", ["--files", "--hidden", "-g", "!**/.git/**", "-g", "!**/node_modules/**"], { cwd: ctx.cwd });
-      if (found.code !== 0 && found.code !== 1) { ctx.ui.notify(`无法读取文件列表：${found.stderr.trim()}`, "error"); return; }
-      const files = found.stdout.trimEnd().split("\n").filter(Boolean);
-      if (files.length === 0) { ctx.ui.notify("当前目录没有可浏览的文件", "warning"); return; }
       const root = await realpath(ctx.cwd);
+      // 主目录可能包含大量私有容器和上百万文件，不能把它当成项目递归扫描。
+      if (root === await realpath(homedir())) {
+        ctx.ui.notify("当前目录是主目录，请在项目目录启动 Pi 后再使用 /code", "warning");
+        return;
+      }
+      const args = ["--files", "--hidden", "--no-messages", "-g", "!**/.git/**", "-g", "!**/node_modules/**"];
+      const found = await pi.exec("rg", args, { cwd: ctx.cwd });
+      if (found.code !== 0 && found.code !== 1 && found.code !== 2) { ctx.ui.notify("无法读取文件列表，请检查当前目录", "error"); return; }
+      const files = found.stdout.trimEnd().split("\n").filter(Boolean);
+      if (files.length === 0) {
+        ctx.ui.notify(found.code === 2 ? "部分目录无法访问，也没有找到可浏览的文件；请进入项目目录后再使用 /code" : "当前目录没有可浏览的文件", "warning");
+        return;
+      }
+      if (found.code === 2) ctx.ui.notify("部分目录无法访问，文件列表不完整；建议在项目目录使用 /code", "warning");
       const selected = await ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => new CodePanel(root, files, theme, () => tui.requestRender(), done));
       if (selected) {
         const draft = ctx.ui.getEditorText();
