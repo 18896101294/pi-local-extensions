@@ -1,12 +1,14 @@
+import { spawn } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Input, matchesKey, SelectList, stripTerminalSequences, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
+import { getCapabilities, Input, matchesKey, SelectList, stripTerminalSequences, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
 
 type FileEntry = { path: string; status: string; oldPath?: string; untracked: boolean };
 type DiffRow = { text: string; kind: "added" | "removed" | "hunk" | "context" | "meta"; oldLine?: number; newLine?: number };
 type CompareRow = { before?: DiffRow; after?: DiffRow; note?: string };
 type Comment = { path: string; row: CompareRow; side: "old" | "new"; text: string };
+type ImagePreview = { before?: string[]; after?: string[]; columns: number; warning?: string };
 
 /** 将 Git 状态映射到 Pi 当前主题的语义颜色。 */
 function statusColor(status: string): ThemeColor {
@@ -16,6 +18,53 @@ function statusColor(status: string): ThemeColor {
 /** 清除差异与文件名中的终端控制字符，防止内容影响界面。 */
 function safeDisplay(text: string): string {
   return text.replace(/[\x00-\x1f\x7f-\x9f]/g, (char) => char === "\t" ? "  " : "�");
+}
+
+/** 有界读取本机命令的二进制输出，避免 Git 图片字节经过 UTF-8 文本接口。 */
+function binaryOutput(command: string, args: string[], input: Buffer | undefined, cwd: string | undefined, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: ["pipe", "pipe", "ignore"] });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const timer = setTimeout(() => child.kill(), 8000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) { child.kill(); reject(new Error("图片超过 8 MB，无法预览")); }
+      else chunks.push(chunk);
+    });
+    child.stdin.on("error", () => {});
+    child.on("error", reject);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) reject(new Error(`${command} 无法读取或解码图片`));
+      else resolve(Buffer.concat(chunks));
+    });
+    child.stdin.end(input);
+  });
+}
+
+/** 使用真彩色半块字符将一张缩小后的 RGB 图像绘成终端行。 */
+export function ansiThumbnail(rgb: Buffer, columns: number, rows: number): string[] {
+  if (rgb.length !== columns * rows * 6) throw new Error("图片解码后的像素数量不正确");
+  const lines: string[] = [];
+  for (let y = 0; y < rows; y++) {
+    let line = "";
+    for (let x = 0; x < columns; x++) {
+      const upper = (y * 2 * columns + x) * 3;
+      const lower = upper + columns * 3;
+      line += `\x1b[38;2;${rgb[upper]};${rgb[upper + 1]};${rgb[upper + 2]}m\x1b[48;2;${rgb[lower]};${rgb[lower + 1]};${rgb[lower + 2]}m▀`;
+    }
+    lines.push(line + "\x1b[0m");
+  }
+  return lines;
+}
+
+/** 用本机 ffmpeg 只取首帧，按固定终端格子生成有界缩略图。 */
+async function thumbnail(data: Buffer, columns: number): Promise<string[]> {
+  const rows = 14;
+  const height = rows * 2;
+  const rgb = await binaryOutput("ffmpeg", ["-hide_banner", "-loglevel", "error", "-threads", "1", "-i", "pipe:0", "-frames:v", "1", "-vf", `scale=${columns}:${height}:force_original_aspect_ratio=decrease,pad=${columns}:${height}:(ow-iw)/2:(oh-ih)/2:black`, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"], data, undefined, columns * height * 3);
+  return ansiThumbnail(rgb, columns, rows);
 }
 
 /** 解析统一差异的旧/新行号，供逐行评论准确定位。 */
@@ -81,18 +130,21 @@ function commentDraft(comments: Comment[]): string {
 
 /** 在终端浏览工作区差异、批注并统一送入 Pi 草稿的只读组件。 */
 export class DiffPanel {
-  private mode: "files" | "diff" | "comment" = "files";
+  private mode: "files" | "diff" | "image" | "comment" = "files";
+  private previousMode: "diff" | "image" = "diff";
   private input = new Input();
   private commentInput = new Input();
   private list!: SelectList;
   private readonly options: SelectItem[];
   private readonly entries: FileEntry[];
   private readonly theme: Theme;
-  private readonly load: (entry: FileEntry) => Promise<string>;
+  private readonly load: (entry: FileEntry, columns: number) => Promise<string | ImagePreview>;
   private readonly refresh: () => void;
   private readonly done: (value?: string) => void;
   private entry?: FileEntry;
   private rows: CompareRow[] = [];
+  private image?: ImagePreview;
+  private viewWidth = 100;
   private index = 0;
   private commentSide: "old" | "new" = "new";
   private top = 0;
@@ -102,7 +154,7 @@ export class DiffPanel {
   focused = true;
 
   /** 初始化筛选列表与差异读取回调。 */
-  constructor(entries: FileEntry[], theme: Theme, load: (entry: FileEntry) => Promise<string>, refresh: () => void, done: (value?: string) => void) {
+  constructor(entries: FileEntry[], theme: Theme, load: (entry: FileEntry, columns: number) => Promise<string | ImagePreview>, refresh: () => void, done: (value?: string) => void) {
     this.entries = entries;
     this.theme = theme;
     this.load = load;
@@ -141,12 +193,14 @@ export class DiffPanel {
     if (this.busy) return;
     this.busy = true;
     try {
-      const patch = await this.load(entry);
+      const columns = Math.max(8, Math.min(48, Math.floor((this.viewWidth - 4) / 2)));
+      const content = await this.load(entry, columns);
       this.entry = entry;
-      this.rows = comparePatch(patch);
+      this.image = typeof content === "string" ? undefined : content;
+      this.rows = typeof content === "string" ? comparePatch(content) : [{ note: "图片预览（文件级评论）" }];
       this.index = 0;
       this.top = 0;
-      this.mode = "diff";
+      this.mode = this.image ? "image" : "diff";
       this.message = "";
     } catch (error) {
       this.message = error instanceof Error ? error.message : String(error);
@@ -158,7 +212,7 @@ export class DiffPanel {
     const text = this.commentInput.getValue().trim();
     if (text && this.entry) this.comments.push({ path: this.entry.path, row: this.rows[this.index]!, side: this.commentSide, text });
     this.commentInput = new Input();
-    this.mode = "diff";
+    this.mode = this.previousMode;
     this.message = text ? `已保存 ${this.comments.length} 条评论；按 S 放入输入框` : "空评论未保存";
   }
 
@@ -177,7 +231,7 @@ export class DiffPanel {
   /** 处理文件筛选、差异导航和评论输入。 */
   handleInput(data: string): void {
     if (this.mode === "comment") {
-      if (matchesKey(data, "escape")) { this.commentInput = new Input(); this.mode = "diff"; }
+      if (matchesKey(data, "escape")) { this.commentInput = new Input(); this.mode = this.previousMode; }
       else if (matchesKey(data, "return")) this.saveComment();
       else this.commentInput.handleInput(data);
     } else if (this.mode === "files") {
@@ -197,6 +251,7 @@ export class DiffPanel {
       else if (data === "c" || data === "C") {
         this.commentSide = data === "C" && this.rows[this.index]?.before ? "old" : this.rows[this.index]?.after ? "new" : this.rows[this.index]?.before ? "old" : "new";
         this.commentInput = new Input();
+        this.previousMode = this.mode;
         this.mode = "comment";
       }
     }
@@ -205,6 +260,7 @@ export class DiffPanel {
 
   /** 用语义颜色呈现增删行、位置及评论编辑框。 */
   render(width: number): string[] {
+    this.viewWidth = width;
     // 超长嵌入行只截取可见前缀渲染；完整内容和行号仍保留在差异模型中。
     const fit = (text: string, columns = width - 1, pad = false) => {
       const prefix = text.slice(0, Math.max(80, columns * 4));
@@ -225,6 +281,20 @@ export class DiffPanel {
       const selected = this.commentSide === "old" ? row?.before : row?.after;
       const location = selected?.newLine ?? selected?.oldLine ?? "文件";
       return [heading, file, fg("muted", fit(` 评论${this.commentSide === "old" ? "旧版" : "当前版"}位置：${location} · ${selected?.text ?? row?.note ?? ""}`)), ...this.commentInput.render(width), fg("dim", fit(" Enter 保存评论  Esc 取消"))];
+    }
+    if (this.mode === "image" && this.image) {
+      const columns = this.image.columns;
+      const sides = fg("muted", fit("旧版 HEAD", columns, true) + " │ " + fit("当前工作区", columns));
+      const height = Math.max(this.image.before?.length ?? 0, this.image.after?.length ?? 0);
+      const pixels = Array.from({ length: height }, (_, index) => {
+        const left = this.image?.before?.[index] ?? " ".repeat(columns);
+        const right = this.image?.after?.[index] ?? " ".repeat(columns);
+        return left + fg("muted", " │ ") + right;
+      });
+      return [heading, file, note, sides,
+        ...(this.image.warning ? [fg("warning", fit(` ${this.image.warning}`))] : pixels),
+        ...(this.message ? [fg("warning", fit(` ${this.message}`))] : []),
+        fg("dim", fit(" 图片预览（缩略图）  c 评论当前版  C 评论旧版  S 放入输入框  Esc 文件  q 退出"))];
     }
     if (this.index < this.top) this.top = this.index;
     if (this.index >= this.top + 18) this.top = this.index - 17;
@@ -275,7 +345,26 @@ export default function diffExtension(pi: ExtensionAPI): void {
       entries.push(...untracked.stdout.split("\0").filter(Boolean).map((path) => ({ path, status: "A", untracked: true })));
       if (!entries.length) { ctx.ui.notify("当前仓库没有未提交改动", "info"); return; }
       // 未跟踪文本按空旧版与完整新文件比较；只限制载入大小，不因超过 1 MB 拒绝审阅。
-      const load = async (entry: FileEntry): Promise<string> => {
+      const load = async (entry: FileEntry, columns: number): Promise<string | ImagePreview> => {
+        if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(extname(entry.path))) {
+          if (!getCapabilities().trueColor) return { columns, warning: "当前终端不支持真彩色图片缩略预览" };
+          try {
+            const before = entry.status[0] === "A" ? undefined
+              : await binaryOutput("git", ["show", `HEAD:${entry.oldPath ?? entry.path}`], undefined, root, 8 * 1024 * 1024);
+            let after: Buffer | undefined;
+            if (entry.status[0] !== "D") {
+              const path = join(root, entry.path);
+              const info = await lstat(path);
+              if (info.isSymbolicLink()) return { columns, warning: "符号链接未展开（可添加文件级评论）" };
+              if (info.size > 8 * 1024 * 1024) return { columns, warning: "图片超过 8 MB，未加载预览" };
+              after = await readFile(path);
+            }
+            return { columns, before: before ? await thumbnail(before, columns) : undefined,
+              after: after ? await thumbnail(after, columns) : undefined };
+          } catch (error) {
+            return { columns, warning: error instanceof Error ? `无法预览图片：${error.message}` : "无法预览图片" };
+          }
+        }
         if (entry.untracked) {
           const info = await lstat(join(root, entry.path));
           if (info.isSymbolicLink()) return "符号链接未展开（可添加文件级评论）";

@@ -4,8 +4,8 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import diffExtension from "../extensions/diff/index.ts";
+import { resetCapabilitiesCache, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
+import diffExtension, { ansiThumbnail } from "../extensions/diff/index.ts";
 
 /** 创建隔离 Git 仓库，覆盖已暂存、未暂存和未跟踪改动。 */
 function repo(): string {
@@ -130,6 +130,77 @@ test("大于 1 MB 的新增文本按旧版空白、当前版全文并排展示",
     });
     await command.run();
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("半块缩略图同时保留上下两个像素的颜色", () => {
+  assert.deepEqual(ansiThumbnail(Buffer.from([255, 0, 0, 0, 0, 255]), 1, 1), ["\x1b[38;2;255;0;0m\x1b[48;2;0;0;255m▀\x1b[0m"]);
+});
+
+test("新增 PNG 在不支持图片协议的终端显示彩色缩略预览并可评论", async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+  const root = repo();
+  execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=8x8:d=1", "-frames:v", "1", "-threads:v", "1", "-y", join(root, "photo.png")], { stdio: "ignore" });
+  const command = setup(root);
+  try {
+    command.drive(async (panel) => {
+      for (const char of "photo") panel.handleInput(char);
+      panel.handleInput("\r");
+      const view = await until(panel, "图片预览");
+      assert.match(view, /旧版 HEAD/);
+      assert.match(view, /当前工作区/);
+      assert.ok(/\x1b\[38;2;\d+;\d+;\d+m\x1b\[48;2;\d+;\d+;\d+m▀/.test(view), "应显示真实像素缩略图而不是二进制占位文字");
+      assert.doesNotMatch(view, /二进制文件未展开/);
+      assert.ok(panel.render(100).every((line: string) => visibleWidth(line) <= 100), "图片缩略图不能溢出终端宽度");
+      panel.handleInput("c");
+      for (const char of "图片太模糊") panel.handleInput(char);
+      panel.handleInput("\r");
+      panel.handleInput("S");
+    });
+    await command.run();
+    assert.match(command.getDraft(), /photo\.png/);
+    assert.match(command.getDraft(), /图片太模糊/);
+  } finally { resetCapabilitiesCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("修改 PNG 可同时预览 HEAD 旧图和工作区新图", async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+  const root = repo();
+  const photo = join(root, "photo.png");
+  const generate = (color: string) => execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=${color}:s=8x8:d=1`, "-frames:v", "1", "-threads:v", "1", "-y", photo], { stdio: "ignore" });
+  generate("red");
+  execFileSync("git", ["add", "photo.png"], { cwd: root });
+  execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "--only", "photo.png", "-m", "photo"], { cwd: root });
+  generate("blue");
+  const command = setup(root);
+  try {
+    command.drive(async (panel) => {
+      for (const char of "photo") panel.handleInput(char);
+      panel.handleInput("\r");
+      const view = await until(panel, "图片预览");
+      assert.match(view, /修改 · photo\.png/);
+      assert.ok(/\x1b\[38;2;2\d\d;0;0m/.test(view), "左侧应有旧版红色像素");
+      assert.ok(/\x1b\[38;2;0;0;2\d\dm/.test(view), "右侧应有当前版蓝色像素");
+      panel.handleInput("q");
+    });
+    await command.run();
+  } finally { resetCapabilitiesCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("不支持真彩色的终端明确提示图片无法预览", async () => {
+  setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+  const root = repo();
+  writeFileSync(join(root, "photo.png"), Buffer.from([1, 2, 3]));
+  const command = setup(root);
+  try {
+    command.drive(async (panel) => {
+      for (const char of "photo") panel.handleInput(char);
+      panel.handleInput("\r");
+      const view = await until(panel, "当前终端不支持真彩色图片缩略预览");
+      assert.doesNotMatch(view, /▀/);
+      panel.handleInput("q");
+    });
+    await command.run();
+  } finally { resetCapabilitiesCache(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("删除文件仅在 HEAD 旧版显示内容", async () => {
