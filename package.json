@@ -25,6 +25,7 @@
   "pi": {
     "extensions": [
       "./extensions/copy-rich/index.ts",
+      "./extensions/branch.ts",
       "./extensions/openai-codex-fast.ts",
       "./extensions/otty-task-title.ts",
       "./extensions/quiet-tool-output/index.ts",
