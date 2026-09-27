@@ -1,12 +1,16 @@
+import { existsSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, SelectList, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
 import { LspClient, type Diagnostic, type Location } from "./lsp.ts";
 
+const globalCsharpTool = join(homedir(), ".dotnet", "tools", process.platform === "win32" ? "csharp-ls.exe" : "csharp-ls");
+
 const SERVERS: Record<string, { command: string; language: string }> = {
+  ".cs": { command: existsSync(globalCsharpTool) ? globalCsharpTool : "csharp-ls", language: "csharp" },
   ".c": { command: "clangd", language: "c" },
   ".h": { command: "clangd", language: "c" },
   ".cc": { command: "clangd", language: "cpp" },
@@ -134,12 +138,17 @@ export class CodePanel {
       this.message = server ? `连接 ${server.command}…` : "本文件无已配置的语言服务器，可只读浏览";
       this.refresh();
       if (server) {
-        const client = new LspClient(server.command);
+        const client = new LspClient(server.command, [], this.root);
         this.client = client;
         client.onDiagnostics = () => { if (!this.closed) this.refresh(); };
         await client.initialize(this.root);
         client.open(path, server.language, text);
-        this.message = `${server.command} 已连接`;
+        if (server.language === "csharp") {
+          this.message = "正在加载 C# 项目…";
+          this.refresh();
+          await client.waitForProjectLoad();
+        }
+        this.message = `${server.language === "csharp" ? "C# 项目已加载" : server.command + " 已连接"}`;
       }
     } catch (error) {
       this.message = error instanceof Error ? error.message : String(error);
@@ -155,6 +164,14 @@ export class CodePanel {
   private async inspect(kind: "definition" | "references" | "hover" | "diagnostics"): Promise<void> {
     if (this.busy) return;
     if (!this.client) { this.message = "此文件没有可用的语言服务器"; this.refresh(); return; }
+    if (kind !== "diagnostics") {
+      const text = this.lines[this.row] ?? "";
+      if (!/[\p{L}\p{N}_]/u.test(text[this.column] ?? "") && !/[\p{L}\p{N}_]/u.test(text[this.column - 1] ?? "")) {
+        this.message = "请用 ←→ 将光标移到接口名或方法名上再查询";
+        this.refresh();
+        return;
+      }
+    }
     if (kind === "diagnostics") {
       const items = this.client.getDiagnostics(this.file);
       this.showLocations(items.map((item) => ({ uri: pathToFileURL(this.file).href, range: item.range })), items.map((item) => item.message.replace(/[\r\n]+/g, " ")));
@@ -251,7 +268,8 @@ export class CodePanel {
       this.input.focused = this.focused;
       return [title, color("muted", line(` ${this.root} · ${this.options.length} 个文件`)), ...this.input.render(width), ...this.list.render(width), ...(this.message ? [color("warning", line(` ${this.message}`))] : []), color("dim", " 输入筛选  ↑↓ 选择  Enter 打开  Esc 退出")];
     }
-    const status = color("muted", line(` ${relative(this.root, this.file)}  ${this.row + 1}:${this.column + 1}  ${this.message}`));
+    const status = color("muted", line(` ${relative(this.root, this.file)}  ${this.row + 1}:${this.column + 1}`));
+    const info = color("accent", line(` ${this.message}`));
     if (this.mode === "results") {
       const start = Math.max(0, Math.min(this.resultIndex - 5, this.results.length - 12));
       const rows = this.results.slice(start, start + 12).map((item, index) => {
@@ -259,9 +277,9 @@ export class CodePanel {
         const label = ` ${start + index === this.resultIndex ? "›" : " "} ${location} ${this.detail[start + index] ?? ""}`;
         return start + index === this.resultIndex ? color("accent", line(label)) : line(label);
       });
-      return [title, status, ...rows, color("dim", " ↑↓ 选择  Enter 跳转  Esc 返回")];
+      return [title, status, info, ...rows, color("dim", " ↑↓ 选择  Enter 跳转  Esc 返回")];
     }
-    if (this.mode === "detail") return [title, status, ...this.detail.slice(this.detailTop, this.detailTop + 12).map(line), color("dim", " ↑↓ 滚动  Esc 返回")];
+    if (this.mode === "detail") return [title, status, info, ...this.detail.slice(this.detailTop, this.detailTop + 12).map(line), color("dim", " ↑↓ 滚动  Esc 返回")];
 
     // 代码窗口跟随光标，行号、选区与诊断符号分别标记。
     if (this.row < this.top) this.top = this.row;
@@ -277,7 +295,7 @@ export class CodePanel {
       const value = line(prefix + shown);
       return selected ? color("success", value) : number === this.row ? color("accent", value) : value;
     });
-    return [title, status, ...rows,
+    return [title, status, info, ...rows,
       color("dim", " ↑↓←→ 定位  v 选区  y 放入输入框  f 文件  q 退出"),
       color("dim", " g 定义  r 引用  h 悬停  d 诊断  Esc 返回文件")];
   }

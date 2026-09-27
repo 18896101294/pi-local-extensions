@@ -16,11 +16,13 @@ export class LspClient {
   private closed = false;
   private stderr = "";
   private diagnostics = new Map<string, Diagnostic[]>();
+  private projectLoaded = false;
+  private projectWaiter?: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
   onDiagnostics?: (uri: string, items: Diagnostic[]) => void;
 
   /** 连接本机语言服务器并监听 JSON-RPC 响应。 */
-  constructor(command: string, args: string[] = []) {
-    this.process = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+  constructor(command: string, args: string[] = [], cwd?: string) {
+    this.process = spawn(command, args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
     this.process.stdout.on("data", (chunk: Buffer) => this.receive(chunk));
     this.process.stderr.on("data", (chunk: Buffer) => { this.stderr = (this.stderr + chunk.toString()).slice(-1024); });
     this.process.on("error", (error) => this.stop(error));
@@ -37,6 +39,19 @@ export class LspClient {
   /** 向语言服务器同步只读缓冲区，供诊断和语义查询使用。 */
   open(file: string, languageId: string, text: string): void {
     this.notify("textDocument/didOpen", { textDocument: { uri: pathToFileURL(file).href, languageId, version: 1, text } });
+  }
+
+  /** 等待 C# 服务器实际加载项目，而不把 LSP 握手成功误当作引用可用。 */
+  waitForProjectLoad(): Promise<void> {
+    if (this.projectLoaded) return Promise.resolve();
+    if (this.closed) return Promise.reject(new Error("语言服务器不可用"));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.projectWaiter = undefined;
+        reject(new Error("C# 项目未加载，请确认当前目录包含 .sln 或 .csproj"));
+      }, 30_000);
+      this.projectWaiter = { resolve, reject, timer };
+    });
   }
 
   /** 获取文件上次收到的诊断。 */
@@ -61,6 +76,11 @@ export class LspClient {
       pending.reject(reason);
     }
     this.pending.clear();
+    if (this.projectWaiter) {
+      clearTimeout(this.projectWaiter.timer);
+      this.projectWaiter.reject(reason);
+      this.projectWaiter = undefined;
+    }
     this.process.kill();
   }
 
@@ -109,7 +129,18 @@ export class LspClient {
   }
 
   /** 派发响应及诊断消息。 */
-  private dispatch(message: { id?: number; method?: string; params?: any; result?: unknown; error?: { message: string } }): void {
+  private dispatch(message: { id?: number | string; method?: string; params?: any; result?: unknown; error?: { message: string } }): void {
+    // 服务器也会主动发送请求；至少须确认动态能力注册，否则 C# 服务会一直等待客户端。
+    if (message.id !== undefined && message.method) {
+      if (message.method === "client/registerCapability" || message.method === "client/unregisterCapability" || message.method === "window/workDoneProgress/create") {
+        this.send({ jsonrpc: "2.0", id: message.id, result: null });
+      } else if (message.method === "workspace/configuration") {
+        this.send({ jsonrpc: "2.0", id: message.id, result: (message.params?.items ?? []).map(() => ({})) });
+      } else {
+        this.send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: `不支持的 LSP 请求：${message.method}` } });
+      }
+      return;
+    }
     if (typeof message.id === "number") {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -117,6 +148,16 @@ export class LspClient {
       clearTimeout(pending.timer);
       if (message.error) pending.reject(new Error(message.error.message));
       else pending.resolve(message.result);
+    } else if (message.method === "$/progress" && message.params?.value?.kind === "end" && /project/i.test(message.params.value.message ?? "")) {
+      // csharp-ls 初始化后异步加载 .sln/.csproj，只有成功加载后才可查询引用。
+      const summary = message.params.value.message as string;
+      this.projectLoaded = summary.startsWith("OK");
+      if (this.projectWaiter) {
+        clearTimeout(this.projectWaiter.timer);
+        if (this.projectLoaded) this.projectWaiter.resolve();
+        else this.projectWaiter.reject(new Error(`C# 项目加载失败：${summary}`));
+        this.projectWaiter = undefined;
+      }
     } else if (message.method === "textDocument/publishDiagnostics") {
       const uri = message.params?.uri;
       const items = message.params?.diagnostics;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { LspClient, type Location } from "../extensions/code/lsp.ts";
@@ -71,6 +71,48 @@ test("已安装的 sourcekit-lsp 可跳转 Swift 变量定义", async (t) => {
     const result = await client.query("textDocument/definition", file, { line: 1, character: 7 });
     const location = (Array.isArray(result) ? result[0] : result) as Location;
     assert.equal(location.range.start.line, 0);
+  } finally { client.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("csharp-ls 能在 .NET 8 项目里查到接口的跨文件引用", async (t) => {
+  const server = join(homedir(), ".dotnet", "tools", "csharp-ls");
+  try { execFileSync(server, ["--version"], { stdio: "ignore" }); }
+  catch { t.skip("未安装 csharp-ls"); return; }
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-code-csharp-")));
+  const file = join(root, "IThing.cs");
+  const text = "public interface IThing { void Run(); }\n";
+  writeFileSync(join(root, "Demo.csproj"), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>');
+  writeFileSync(file, text);
+  writeFileSync(join(root, "Thing.cs"), "public class Thing : IThing { public void Run() {} }\n");
+  writeFileSync(join(root, "Usage.cs"), "public class Usage { IThing value = new Thing(); }\n");
+  execFileSync("dotnet", ["restore", "--ignore-failed-sources"], { cwd: root, stdio: "ignore", timeout: 30_000 });
+  const client = new LspClient(server, [], root);
+  try {
+    await client.initialize(root);
+    client.open(file, "csharp", text);
+    await client.waitForProjectLoad();
+    const references = await client.query("textDocument/references", file, { line: 0, character: text.indexOf("IThing") + 2 }) as Location[];
+    assert.ok(Array.isArray(references) && references.length >= 2, "应至少找到实现和使用处");
+    assert.ok(references.some((item) => item.uri.endsWith("Thing.cs")));
+    client.stop();
+
+    const panel = new CodePanel(root, ["IThing.cs", "Thing.cs"], { fg: (_color: string, value: string) => value } as any, () => {}, () => {});
+    /** 等待项目真正加载并显示引用列表，验证 r 不是只发送了请求。 */
+    async function until(value: string): Promise<void> {
+      for (let i = 0; i < 500; i++) {
+        if (panel.render(120).join("\n").includes(value)) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(`C# 面板未出现：${value}`);
+    }
+    try {
+      panel.handleInput("\r");
+      await until("C# 项目已加载");
+      for (let i = 0; i < text.indexOf("IThing") + 2; i++) panel.handleInput("\x1b[C");
+      panel.handleInput("r");
+      await until("Enter 跳转");
+      assert.match(panel.render(120).join("\n"), /Thing\.cs/);
+    } finally { panel.dispose(); }
   } finally { client.stop(); rmSync(root, { recursive: true, force: true }); }
 });
 
