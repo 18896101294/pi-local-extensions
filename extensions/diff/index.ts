@@ -113,6 +113,12 @@ export function comparePatch(patch: string): CompareRow[] {
   return result.length ? result : [{ note: "（空文件或没有可显示的文本差异）" }];
 }
 
+/** 将连续的新增或删除行合并为一处可跳转的变更。 */
+function changeStarts(rows: CompareRow[]): number[] {
+  const changed = (row?: CompareRow) => row?.before?.kind === "removed" || row?.after?.kind === "added";
+  return rows.flatMap((row, index) => changed(row) && !changed(rows[index - 1]) ? [index] : []);
+}
+
 /** 截短嵌入内容等超长单行，防止评论草稿被整个大文件撑满。 */
 function excerpt(text: string): string {
   return safeDisplay(text.slice(0, 160)) + (text.length > 160 ? "…（长行已截断）" : "");
@@ -143,6 +149,7 @@ export class DiffPanel {
   private readonly done: (value?: string) => void;
   private entry?: FileEntry;
   private rows: CompareRow[] = [];
+  private changes: number[] = [];
   private image?: ImagePreview;
   private viewWidth = 100;
   private index = 0;
@@ -198,6 +205,7 @@ export class DiffPanel {
       this.entry = entry;
       this.image = typeof content === "string" ? undefined : content;
       this.rows = typeof content === "string" ? comparePatch(content) : [{ note: "图片预览（文件级评论）" }];
+      this.changes = this.image ? [] : changeStarts(this.rows);
       this.index = 0;
       this.top = 0;
       this.mode = this.image ? "image" : "diff";
@@ -205,6 +213,19 @@ export class DiffPanel {
     } catch (error) {
       this.message = error instanceof Error ? error.message : String(error);
     } finally { this.busy = false; this.refresh(); }
+  }
+
+  /** 跳到前后变更块的起点，到边界后循环，避免逐行翻找。 */
+  private jumpChange(direction: 1 | -1): void {
+    if (!this.changes.length) { this.message = "当前文件没有可跳转的文本差异"; return; }
+    const current = this.rows[this.index];
+    const onChange = current?.before?.kind === "removed" || current?.after?.kind === "added";
+    const currentStart = onChange ? this.changes.filter((index) => index <= this.index).at(-1)! : this.index;
+    const target = direction === 1
+      ? this.changes.find((index) => index > this.index) ?? this.changes[0]!
+      : this.changes.filter((index) => index < currentStart).at(-1) ?? this.changes.at(-1)!;
+    this.index = target;
+    this.message = `第 ${this.changes.indexOf(target) + 1}/${this.changes.length} 处差异`;
   }
 
   /** 保存当前差异行的单条评论，空内容不加入列表。 */
@@ -248,6 +269,7 @@ export class DiffPanel {
       else if (matchesKey(data, "down")) this.index = Math.min(this.rows.length - 1, this.index + 1);
       else if (matchesKey(data, "pageUp")) this.index = Math.max(0, this.index - 18);
       else if (matchesKey(data, "pageDown")) this.index = Math.min(this.rows.length - 1, this.index + 18);
+      else if (this.mode === "diff" && (data === "n" || data === "N")) this.jumpChange(data === "n" ? 1 : -1);
       else if (data === "c" || data === "C") {
         this.commentSide = data === "C" && this.rows[this.index]?.before ? "old" : this.rows[this.index]?.after ? "new" : this.rows[this.index]?.before ? "old" : "new";
         this.commentInput = new Input();
@@ -315,7 +337,7 @@ export class DiffPanel {
         + fg("muted", " │ ") + fg(after?.kind === "added" ? "toolDiffAdded" : "text", right);
       return current ? this.theme.bg("selectedBg", styled) : styled;
     });
-    return [heading, file, note, headings, ...rows, ...(this.message ? [fg("warning", fit(` ${this.message}`))] : []), fg("dim", fit(" ↑↓ 翻行  PgUp/PgDn 翻页  c 评论当前版  C 评论旧版  S 放入输入框  Esc 文件  q 退出"))];
+    return [heading, file, note, headings, ...rows, ...(this.message ? [fg("warning", fit(` ${this.message}`))] : []), fg("dim", fit(" ↑↓ 逐行  n 下一处  N 上一处  PgUp/PgDn 翻页  c/C 评论  S 放入输入框  Esc 文件  q 退出"))];
   }
 
   invalidate(): void {}

@@ -234,6 +234,45 @@ test("修改文件将旧行与新行排在同一行对比", async () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("n/N 在同一文件的差异块之间跳转并越过连续变更行", async () => {
+  const root = repo();
+  const file = join(root, "many.txt");
+  const original = Array.from({ length: 45 }, (_, index) => `old-${index + 1}`);
+  writeFileSync(file, original.join("\n") + "\n");
+  execFileSync("git", ["add", "many.txt"], { cwd: root });
+  execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "--only", "many.txt", "-m", "fixture"], { cwd: root });
+  for (const line of [2, 3, 15, 35]) original[line - 1] = `new-${line}`;
+  writeFileSync(file, original.join("\n") + "\n");
+  const command = setup(root);
+  try {
+    command.drive(async (panel) => {
+      for (const char of "many.txt") panel.handleInput(char);
+      panel.handleInput("\r");
+      await until(panel, "旧版 HEAD");
+      const current = () => panel.render(100).find((line: string) => line.includes("›")) ?? "";
+      panel.handleInput("n");
+      assert.match(current(), /new-2/);
+      panel.handleInput("\x1b[B");
+      assert.match(current(), /new-3/);
+      panel.handleInput("n");
+      assert.match(current(), /new-15/, "连续两行修改属于同一处差异");
+      panel.handleInput("n");
+      assert.match(current(), /new-35/, "跳转后应滚动到可见位置");
+      panel.handleInput("N");
+      assert.match(current(), /new-15/);
+      panel.handleInput("N");
+      assert.match(current(), /new-2/);
+      panel.handleInput("N");
+      assert.match(current(), /new-35/, "上一处在文件开头应回到最后一处");
+      panel.handleInput("n");
+      assert.match(current(), /new-2/, "下一处在文件末尾应回到第一处");
+      assert.match(panel.render(100).at(-1) ?? "", /n 下一处.*N 上一处/);
+      panel.handleInput("q");
+    });
+    await command.run();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("差异行评论可批量放入对话输入框，保留草稿且不改文件", async () => {
   const root = repo();
   const command = setup(root);
