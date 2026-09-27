@@ -90,7 +90,7 @@ test("csharp-ls 能在 .NET 8 项目里查到接口的跨文件引用", async (t
   try {
     await client.initialize(root);
     client.open(file, "csharp", text);
-    await client.waitForProjectLoad();
+    await client.waitForWorkspaceLoad();
     const references = await client.query("textDocument/references", file, { line: 0, character: text.indexOf("IThing") + 2 }) as Location[];
     assert.ok(Array.isArray(references) && references.length >= 2, "应至少找到实现和使用处");
     assert.ok(references.some((item) => item.uri.endsWith("Thing.cs")));
@@ -111,8 +111,38 @@ test("csharp-ls 能在 .NET 8 项目里查到接口的跨文件引用", async (t
       for (let i = 0; i < text.indexOf("IThing") + 2; i++) panel.handleInput("\x1b[C");
       panel.handleInput("r");
       await until("Enter 跳转");
-      assert.match(panel.render(120).join("\n"), /Thing\.cs/);
+      assert.match(panel.render(35).join("\n"), /(?:^|[\s/])Thing\.cs:1/m, "窄终端也应看到引用所属文件");
+      assert.doesNotMatch(panel.render(120).find((line) => line.includes("›")) ?? "", /IThing\.cs:1/, "默认选中引用而非当前位置的声明");
     } finally { panel.dispose(); }
+  } finally { client.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("csharp-ls 加载 .sln 后识别解决方案就绪并查询接口引用", async (t) => {
+  const server = join(homedir(), ".dotnet", "tools", "csharp-ls");
+  try { execFileSync(server, ["--version"], { stdio: "ignore" }); }
+  catch { t.skip("未安装 csharp-ls"); return; }
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-code-solution-")));
+  const file = join(root, "IThing.cs");
+  const text = "public interface IThing { void Run(); }\n";
+  writeFileSync(join(root, "Demo.csproj"), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>');
+  writeFileSync(file, text);
+  writeFileSync(join(root, "Thing.cs"), "public class Thing : IThing { public void Run() {} }\n");
+  execFileSync("dotnet", ["new", "sln", "-n", "Demo"], { cwd: root, stdio: "ignore", timeout: 10_000 });
+  execFileSync("dotnet", ["sln", "Demo.sln", "add", "Demo.csproj"], { cwd: root, stdio: "ignore", timeout: 10_000 });
+  execFileSync("dotnet", ["restore", "--ignore-failed-sources"], { cwd: root, stdio: "ignore", timeout: 30_000 });
+  const client = new LspClient(server, [], root);
+  try {
+    await client.initialize(root);
+    client.open(file, "csharp", text);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        client.waitForWorkspaceLoad(),
+        new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("解决方案加载事件未被识别")), 5_000); }),
+      ]);
+    } finally { if (deadline) clearTimeout(deadline); }
+    const refs = await client.query("textDocument/references", file, { line: 0, character: text.indexOf("IThing") + 2 }) as Location[];
+    assert.ok(refs.some((item) => item.uri.endsWith("Thing.cs")));
   } finally { client.stop(); rmSync(root, { recursive: true, force: true }); }
 });
 

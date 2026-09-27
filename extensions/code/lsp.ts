@@ -17,6 +17,7 @@ export class LspClient {
   private stderr = "";
   private diagnostics = new Map<string, Diagnostic[]>();
   private projectLoaded = false;
+  private loadFailureCount = 0;
   private projectWaiter?: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
   onDiagnostics?: (uri: string, items: Diagnostic[]) => void;
 
@@ -42,17 +43,20 @@ export class LspClient {
   }
 
   /** 等待 C# 服务器实际加载项目，而不把 LSP 握手成功误当作引用可用。 */
-  waitForProjectLoad(): Promise<void> {
+  waitForWorkspaceLoad(): Promise<void> {
     if (this.projectLoaded) return Promise.resolve();
     if (this.closed) return Promise.reject(new Error("语言服务器不可用"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.projectWaiter = undefined;
-        reject(new Error("C# 项目未加载，请确认当前目录包含 .sln 或 .csproj"));
+        reject(new Error("C# 工作区加载超时；请检查解决方案或项目的加载日志"));
       }, 30_000);
       this.projectWaiter = { resolve, reject, timer };
     });
   }
+
+  /** 返回服务器在加载工作区时报告的 MSBuild 失败诊断数。 */
+  getLoadFailureCount(): number { return this.loadFailureCount; }
 
   /** 获取文件上次收到的诊断。 */
   getDiagnostics(file: string): Diagnostic[] {
@@ -148,16 +152,18 @@ export class LspClient {
       clearTimeout(pending.timer);
       if (message.error) pending.reject(new Error(message.error.message));
       else pending.resolve(message.result);
-    } else if (message.method === "$/progress" && message.params?.value?.kind === "end" && /project/i.test(message.params.value.message ?? "")) {
-      // csharp-ls 初始化后异步加载 .sln/.csproj，只有成功加载后才可查询引用。
+    } else if (message.method === "$/progress" && message.params?.value?.kind === "end" && /project|solution/i.test(message.params.value.message ?? "")) {
+      // csharp-ls 按工作区选择加载 .sln 或 .csproj，两种完成通知都需要识别。
       const summary = message.params.value.message as string;
-      this.projectLoaded = summary.startsWith("OK");
+      this.projectLoaded = /^(OK\b|Finished loading solution\b)/i.test(summary);
       if (this.projectWaiter) {
         clearTimeout(this.projectWaiter.timer);
         if (this.projectLoaded) this.projectWaiter.resolve();
         else this.projectWaiter.reject(new Error(`C# 项目加载失败：${summary}`));
         this.projectWaiter = undefined;
       }
+    } else if (message.method === "window/showMessage" && typeof message.params?.message === "string" && message.params.message.includes("msbuildWorkspace.Diagnostics: [Failure]")) {
+      this.loadFailureCount++;
     } else if (message.method === "textDocument/publishDiagnostics") {
       const uri = message.params?.uri;
       const items = message.params?.diagnostics;

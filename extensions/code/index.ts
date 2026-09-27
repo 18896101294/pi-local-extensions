@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, SelectList, truncateToWidth, type SelectItem } from "@earendil-works/pi-tui";
@@ -146,9 +146,12 @@ export class CodePanel {
         if (server.language === "csharp") {
           this.message = "正在加载 C# 项目…";
           this.refresh();
-          await client.waitForProjectLoad();
+          await client.waitForWorkspaceLoad();
         }
-        this.message = `${server.language === "csharp" ? "C# 项目已加载" : server.command + " 已连接"}`;
+        const failures = client.getLoadFailureCount();
+        this.message = server.language === "csharp"
+          ? failures > 0 ? `C# 已加载，但有 ${failures} 条 MSBuild 失败诊断，引用可能不完整` : "C# 项目已加载"
+          : `${server.command} 已连接`;
       }
     } catch (error) {
       this.message = error instanceof Error ? error.message : String(error);
@@ -185,7 +188,14 @@ export class CodePanel {
         this.detailTop = 0;
         this.mode = "detail";
       } else {
-        this.showLocations(locations(value));
+        const items = locations(value);
+        this.showLocations(items);
+        if (kind === "references") {
+          // 引用结果常以当前声明开头，默认定位到真正的使用处，避免 Enter 又回到原地。
+          const currentUri = pathToFileURL(this.file).href;
+          const next = items.findIndex((item) => item.uri !== currentUri || item.range.start.line !== this.row || this.column < item.range.start.character || this.column >= item.range.end.character);
+          if (next > 0) this.resultIndex = next;
+        }
       }
     } catch (error) {
       this.message = error instanceof Error ? error.message : String(error);
@@ -273,7 +283,8 @@ export class CodePanel {
     if (this.mode === "results") {
       const start = Math.max(0, Math.min(this.resultIndex - 5, this.results.length - 12));
       const rows = this.results.slice(start, start + 12).map((item, index) => {
-        const location = `${fileURLToPath(item.uri)}:${item.range.start.line + 1}`;
+        const target = relative(this.root, fileURLToPath(item.uri));
+        const location = `${basename(target)}:${item.range.start.line + 1}  ${dirname(target) === "." ? "" : dirname(target)}`;
         const label = ` ${start + index === this.resultIndex ? "›" : " "} ${location} ${this.detail[start + index] ?? ""}`;
         return start + index === this.resultIndex ? color("accent", line(label)) : line(label);
       });
