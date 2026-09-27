@@ -104,12 +104,12 @@ test("切换遇到未提交改动冲突时，保持原分支并反馈 Git 错误
   assert.equal(execFileSync("git", ["-C", cwd, "show", ":example.txt"], { encoding: "utf8" }), "feature\n");
 }));
 
-test("不在 Git 仓库时报告错误", async () => {
+test("不在 Git 仓库时给出可操作的提示", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-not-git-"));
   try {
     const command = setup(cwd);
     await command.run();
-    assert.equal(command.notices.at(-1)?.[1], "error");
+    assert.deepEqual(command.notices.at(-1), ["当前目录不是 Git 项目，请进入 Git 项目目录后再使用 /branch", "warning"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

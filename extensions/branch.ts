@@ -14,7 +14,12 @@ export default function branchExtension(pi: ExtensionAPI): void {
       // 所有 Git 命令都绑定会话目录，避免误操作扩展自身所在的仓库。
       const branches = await pi.exec("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: ctx.cwd });
       if (branches.code !== 0) {
-        ctx.ui.notify(`读取分支失败：${branches.stderr.trim() || "当前目录不是 Git 仓库"}`, "error");
+        // 非 Git 目录是常见使用场景，提示下一步即可；其他 Git 故障保留原始原因。
+        if (/not a git repository/i.test(branches.stderr)) {
+          ctx.ui.notify("当前目录不是 Git 项目，请进入 Git 项目目录后再使用 /branch", "warning");
+        } else {
+          ctx.ui.notify(`读取分支失败：${branches.stderr.trim() || "Git 命令执行失败"}`, "error");
+        }
         return;
       }
       const names = branches.stdout.trimEnd().split("\n").filter(Boolean);
